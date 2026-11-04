@@ -1,0 +1,691 @@
+name: Build Acuy Ai APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths-ignore: ['**.md']
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Generate project files
+        run: |
+          mkdir -p app/src/main/java/com/rizal/jarvis app/src/main/res/xml
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "Jarvis"
+          include(":app")
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          echo "org.gradle.jvmargs=-Xmx2g" > gradle.properties
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.rizal.jarvis"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.rizal.jarvis"
+                  minSdk = 26
+                  targetSdk = 33
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>
+              <queries>
+                  <intent><action android:name="android.speech.RecognitionService"/></intent>
+                  <intent><action android:name="android.intent.action.TTS_SERVICE"/></intent>
+              </queries>
+              <application android:label="Ai Trio" android:allowBackup="false">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <activity android:name=".TriggerActivity" android:exported="true"
+                      android:theme="@android:style/Theme.Translucent.NoTitleBar"
+                      android:excludeFromRecents="true" android:taskAffinity="">
+                      <intent-filter>
+                          <action android:name="com.rizal.jarvis.LISTEN"/>
+                          <category android:name="android.intent.category.DEFAULT"/>
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".BubbleService" android:exported="false"/>
+                  <service android:name=".JService" android:exported="true"
+                      android:permission="android.permission.BIND_VOICE_INTERACTION">
+                      <meta-data android:name="android.voice_interaction" android:resource="@xml/interaction"/>
+                      <intent-filter>
+                          <action android:name="android.service.voice.VoiceInteractionService"/>
+                      </intent-filter>
+                  </service>
+                  <service android:name=".JSessionService" android:exported="true"
+                      android:permission="android.permission.BIND_VOICE_INTERACTION"/>
+                  <service android:name=".JRecognition" android:exported="true"
+                      android:permission="android.permission.RECORD_AUDIO">
+                      <intent-filter>
+                          <action android:name="android.speech.RecognitionService"/>
+                          <category android:name="android.intent.category.DEFAULT"/>
+                      </intent-filter>
+                  </service>
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/java/com/rizal/jarvis/MainActivity.kt <<'EOF'
+          package com.rizal.jarvis
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.widget.*
+
+          class MainActivity : Activity() {
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  val p = getSharedPreferences("j", MODE_PRIVATE)
+                  val l = LinearLayout(this)
+                  l.orientation = LinearLayout.VERTICAL
+                  l.setPadding(48, 120, 48, 48)
+                  val t = TextView(this)
+                  t.text = "Ai Trio"
+                  t.textSize = 26f
+                  val key = EditText(this)
+                  key.hint = "API key Anthropic (sk-ant-...)"
+                  key.setText(p.getString("key", ""))
+                  val nick = EditText(this)
+                  nick.hint = "Nama panggilan (versi singkat pakai koma, mis: Adrian, Ian)"
+                  nick.setText(p.getString("nick", ""))
+                  val opts = listOf("ucok" to "Ucok: tengil, konyol, tapi baik dan asik", "azril" to "Azril: baik, bijak, suka bercanda", "devan" to "Devan: agak dingin, pintar, bijak")
+                  val rg = RadioGroup(this)
+                  for ((i, o) in opts.withIndex()) {
+                      val rb = RadioButton(this)
+                      rb.id = 100 + i
+                      rb.text = o.second
+                      rb.isChecked = (p.getString("char", "ucok") == o.first)
+                      rg.addView(rb)
+                  }
+                  val msg = TextView(this)
+                  val b1 = Button(this)
+                  b1.text = "1. Simpan API key, nama panggilan, karakter"
+                  b1.setOnClickListener {
+                      p.edit().putString("key", key.text.toString().trim()).putString("nick", nick.text.toString().trim()).apply()
+                      val sel = rg.checkedRadioButtonId - 100
+                      if (sel in 0..2) p.edit().putString("char", opts[sel].first).apply()
+                      msg.text = "Tersimpan."
+                  }
+                  val b2 = Button(this)
+                  b2.text = "2. Izinkan tampil di atas aplikasi lain"
+                  b2.setOnClickListener {
+                      startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + packageName)))
+                  }
+                  val b3 = Button(this)
+                  b3.text = "3. Izinkan mikrofon dan notifikasi"
+                  b3.setOnClickListener {
+                      val perms = arrayListOf(Manifest.permission.RECORD_AUDIO)
+                      if (Build.VERSION.SDK_INT >= 33) perms.add(Manifest.permission.POST_NOTIFICATIONS)
+                      requestPermissions(perms.toTypedArray(), 1)
+                  }
+                  val b4 = Button(this)
+                  b4.text = "4. Mulai / terapkan karakter"
+                  b4.setOnClickListener {
+                      if (!Settings.canDrawOverlays(this)) {
+                          msg.text = "Langkah 2 belum diizinkan."
+                          return@setOnClickListener
+                      }
+                      if (p.getString("nick", "").isNullOrBlank()) {
+                          msg.text = "Isi nama panggilan dulu (contoh: Adrian, Ian)."
+                          return@setOnClickListener
+                      }
+                      if (p.getString("key", "").isNullOrBlank()) {
+                          msg.text = "Isi dan simpan API key dulu."
+                          return@setOnClickListener
+                      }
+                      startForegroundService(Intent(this, BubbleService::class.java).setAction("RELOAD"))
+                      msg.text = "Aktif. Ketuk bubble untuk bicara."
+                  }
+                  for (v in listOf(t, key, nick, rg, b1, b2, b3, b4, msg)) l.addView(v)
+                  val sv = ScrollView(this)
+                  sv.addView(l)
+                  setContentView(sv)
+              }
+          }
+          EOF
+          cat > app/src/main/res/xml/interaction.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:sessionService="com.rizal.jarvis.JSessionService"
+              android:recognitionService="com.rizal.jarvis.JRecognition"
+              android:supportsAssist="true"/>
+          EOF
+          cat > app/src/main/java/com/rizal/jarvis/Assist.kt <<'EOF'
+          package com.rizal.jarvis
+
+          import android.content.Context
+          import android.content.Intent
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.service.voice.VoiceInteractionService
+          import android.service.voice.VoiceInteractionSession
+          import android.service.voice.VoiceInteractionSessionService
+          import android.speech.RecognitionService
+          import android.speech.SpeechRecognizer
+
+          class JService : VoiceInteractionService()
+
+          class JSessionService : VoiceInteractionSessionService() {
+              override fun onNewSession(args: Bundle?): VoiceInteractionSession = JSession(this)
+          }
+
+          class JSession(c: Context) : VoiceInteractionSession(c) {
+              override fun onShow(args: Bundle?, showFlags: Int) {
+                  super.onShow(args, showFlags)
+                  if (Settings.canDrawOverlays(context)) {
+                      val i = Intent(context, BubbleService::class.java)
+                      i.action = "LISTEN"
+                      context.startForegroundService(i)
+                  }
+                  hide()
+              }
+          }
+
+          class JRecognition : RecognitionService() {
+              override fun onStartListening(i: Intent?, c: Callback?) { c?.error(SpeechRecognizer.ERROR_CLIENT) }
+              override fun onCancel(c: Callback?) {}
+              override fun onStopListening(c: Callback?) {}
+          }
+          EOF
+          cat > app/src/main/java/com/rizal/jarvis/TriggerActivity.kt <<'EOF'
+          package com.rizal.jarvis
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.os.Bundle
+          import android.provider.Settings
+
+          class TriggerActivity : Activity() {
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  if (Settings.canDrawOverlays(this)) {
+                      val i = Intent(this, BubbleService::class.java)
+                      i.action = "LISTEN"
+                      startForegroundService(i)
+                  }
+                  finish()
+              }
+          }
+          EOF
+          cat > app/src/main/java/com/rizal/jarvis/BubbleService.kt <<'EOF'
+          package com.rizal.jarvis
+
+          import android.Manifest
+          import android.app.*
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.speech.RecognitionListener
+          import android.speech.RecognizerIntent
+          import android.speech.SpeechRecognizer
+          import android.speech.tts.TextToSpeech
+          import android.speech.tts.UtteranceProgressListener
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.WindowManager
+          import android.widget.TextView
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.util.Locale
+
+          class BubbleService : Service(), TextToSpeech.OnInitListener {
+              private lateinit var wm: WindowManager
+              private lateinit var bubble: TextView
+              private lateinit var card: TextView
+              private lateinit var bp: WindowManager.LayoutParams
+              private lateinit var cp: WindowManager.LayoutParams
+              private var cardShown = false
+              private var tts: TextToSpeech? = null
+              private var sr: SpeechRecognizer? = null
+              private val ui = Handler(Looper.getMainLooper())
+              private val hist = ArrayList<Pair<String, String>>()
+              private val COMMON = "Kemampuanmu: pintar, bijaksana, dan jago coding. Panggil pengguna dengan NICK (kalau ada dua pilihan, ganti-ganti secara acak: kadang lengkap, kadang singkat), jangan pakai sapaan lebay seperti bos atau tuan. Jawab dalam bahasa pengguna (default Bahasa Indonesia santai), maksimal 3 kalimat kecuali diminta detail. Tanpa markdown dan tanpa simbol aneh karena jawabanmu dibacakan lewat suara. Untuk pertanyaan coding, jelaskan idenya secara lisan dengan singkat dan jangan membacakan kode baris per baris."
+
+              private fun sys(): String {
+                  val p = when (ch()) {
+                      "azril" -> "Kamu adalah AZRIL, asisten AI pribadi berbahasa Indonesia. Sifatmu: baik hati, bijak, suka bercanda ringan, dan asik diajak ngobrol."
+                      "devan" -> "Kamu adalah DEVAN, asisten AI pribadi berbahasa Indonesia. Sifatmu: agak dingin dan irit kata, pintar, bijak, tapi tetap asik. Humormu kering dan sesekali terselip rasa peduli."
+                      else -> "Kamu adalah UCOK, asisten AI pribadi berbahasa Indonesia. Sifatmu: kadang konyol dan tengil (suka bercanda dan meledek secara akrab, tidak kasar), tapi baik dan asik, responsif dan to the point."
+                  }
+                  return p + " " + COMMON.replace("NICK", names().joinToString(" atau "))
+              }
+              private val hideR = Runnable {
+                  if (cardShown) {
+                      cardShown = false
+                      try { wm.removeView(card) } catch (e: Exception) {}
+                      setFace("idle")
+                  }
+              }
+
+              override fun onBind(i: Intent?): IBinder? = null
+
+              override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
+                  if (i?.action == "STOP") {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+                  if (i?.action == "LISTEN") ui.post { listen() }
+                  if (i?.action == "RELOAD") ui.post { applyChar() }
+                  return START_STICKY
+              }
+
+              override fun onCreate() {
+                  super.onCreate()
+                  val ch = "jarvis"
+                  getSystemService(NotificationManager::class.java)
+                      .createNotificationChannel(NotificationChannel(ch, "Ai Trio", NotificationManager.IMPORTANCE_LOW))
+                  val stop = PendingIntent.getService(this, 1, Intent(this, BubbleService::class.java).setAction("STOP"), PendingIntent.FLAG_IMMUTABLE)
+                  val n = Notification.Builder(this, ch)
+                      .setContentTitle("Asisten aktif")
+                      .setContentText("Ketuk bubble untuk bicara")
+                      .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                      .addAction(Notification.Action.Builder(0, "Matikan", stop).build())
+                      .build()
+                  startForeground(1, n)
+
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  tts = TextToSpeech(this, this)
+
+                  bubble = TextView(this)
+                  bubble.text = "U"
+                  bubble.textSize = 26f
+                  bubble.setTextColor(0xFF19D3FF.toInt())
+                  bubble.gravity = Gravity.CENTER
+                  val bg = GradientDrawable()
+                  bg.shape = GradientDrawable.OVAL
+                  bg.setColor(0xDD001F2E.toInt())
+                  bg.setStroke(6, 0xFF19D3FF.toInt())
+                  bubble.background = bg
+                  bp = WindowManager.LayoutParams(faceSize(), faceSize(), WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT)
+                  bp.gravity = Gravity.TOP or Gravity.START
+                  bp.x = 20
+                  bp.y = 400
+
+                  card = TextView(this)
+                  card.setTextColor(Color.WHITE)
+                  card.textSize = 15f
+                  card.setPadding(36, 24, 36, 24)
+                  card.maxWidth = (resources.displayMetrics.widthPixels * 0.85).toInt()
+                  val cg = GradientDrawable()
+                  cg.setColor(0xEE06202E.toInt())
+                  cg.cornerRadius = 36f
+                  cg.setStroke(2, 0xFF19D3FF.toInt())
+                  card.background = cg
+                  cp = WindowManager.LayoutParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                      PixelFormat.TRANSLUCENT)
+                  cp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                  cp.y = 140
+
+                  var sx = 0
+                  var sy = 0
+                  var tx = 0f
+                  var ty = 0f
+                  var moved = false
+                  bubble.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              sx = bp.x
+                              sy = bp.y
+                              tx = e.rawX
+                              ty = e.rawY
+                              moved = false
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              val dx = (e.rawX - tx).toInt()
+                              val dy = (e.rawY - ty).toInt()
+                              if (Math.abs(dx) > 12 || Math.abs(dy) > 12) moved = true
+                              if (moved) {
+                                  bp.x = sx + dx
+                                  bp.y = sy + dy
+                                  wm.updateViewLayout(bubble, bp)
+                              }
+                          }
+                          MotionEvent.ACTION_UP -> {
+                              if (!moved) listen()
+                          }
+                      }
+                      true
+                  }
+                  applyChar()
+                  try {
+                      wm.addView(bubble, bp)
+                                            bubbleAdded = true
+                  } catch (e: Exception) {
+                      stopSelf()
+                  }
+              }
+
+              override fun onInit(status: Int) {
+                  tts?.language = Locale("id", "ID")
+                  applyVoice()
+                  tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                      override fun onStart(id: String?) {}
+                      override fun onDone(id: String?) {
+                          if (id == "ack") ui.post { startRec() } else ui.post {
+                              setFace("idle")
+                              hideLater(4000)
+                          }
+                      }
+                      override fun onError(id: String?) {}
+                  })
+              }
+
+              private fun showCard(t: String) {
+                  ui.removeCallbacks(hideR)
+                  card.text = t
+                  if (!cardShown) {
+                      try {
+                          wm.addView(card, cp)
+                          cardShown = true
+                      } catch (e: Exception) {}
+                  }
+              }
+
+              private fun hideLater(ms: Long) {
+                  ui.removeCallbacks(hideR)
+                  ui.postDelayed(hideR, ms)
+              }
+
+              private var bubbleAdded = false
+
+              private fun ch(): String = getSharedPreferences("j", MODE_PRIVATE).getString("char", "ucok") ?: "ucok"
+
+              private fun faceId(n: String): Int {
+                  var id = resources.getIdentifier(ch() + "_" + n, "drawable", packageName)
+                  if (id == 0) id = resources.getIdentifier(ch() + "_idle", "drawable", packageName)
+                  return id
+              }
+
+              private fun faceSize(): Int = if (faceId("idle") != 0) 260 else 150
+
+              private fun ring(): GradientDrawable {
+                  val g = GradientDrawable()
+                  g.shape = GradientDrawable.OVAL
+                  g.setColor(0xDD001F2E.toInt())
+                  g.setStroke(6, 0xFF19D3FF.toInt())
+                  return g
+              }
+
+              private fun setFace(n: String) {
+                  val id = faceId(n)
+                  if (id != 0) {
+                      bubble.background = getDrawable(id)
+                  } else {
+                      (bubble.background as? GradientDrawable)?.setStroke(6, if (n == "listen") 0xFFFF5D5D.toInt() else 0xFF19D3FF.toInt())
+                  }
+              }
+
+              private fun applyChar() {
+                  bp.width = faceSize()
+                  bp.height = faceSize()
+                  if (faceId("idle") != 0) {
+                      bubble.text = ""
+                  } else {
+                      bubble.text = ch().take(1).uppercase()
+                      bubble.background = ring()
+                  }
+                  setFace("idle")
+                  if (bubbleAdded) {
+                      try { wm.updateViewLayout(bubble, bp) } catch (e: Exception) {}
+                  }
+              }
+
+              private fun ack(): String = when (ch()) {
+                  "azril" -> "Iya, ada yang bisa dibantu?"
+                  "devan" -> "Hm. Apa?"
+                  else -> "Oy, ada apa?"
+              }
+
+              private fun applyVoice() {
+                  try {
+                      applyVoiceUnsafe()
+                  } catch (e: Exception) {}
+              }
+
+              private fun applyVoiceUnsafe() {
+                  val t = tts ?: return
+                  val c = ch()
+                  val vs = (t.voices ?: emptySet()).filter { it.locale.language == "in" || it.locale.language == "id" }.sortedBy { it.name }
+                  if (vs.isNotEmpty()) {
+                      val idx = when (c) { "azril" -> 1; "devan" -> 2; else -> 0 }
+                      t.setVoice(vs[idx % vs.size])
+                  }
+                  when (c) {
+                      "azril" -> { t.setPitch(1.0f); t.setSpeechRate(1.0f) }
+                      "devan" -> { t.setPitch(0.7f); t.setSpeechRate(0.95f) }
+                      else -> { t.setPitch(1.45f); t.setSpeechRate(1.1f) }
+                  }
+              }
+
+              private fun mark(on: Boolean) = setFace(if (on) "listen" else "idle")
+
+              private fun listen() {
+                  if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                      showCard("Izinkan mikrofon dulu di aplikasi Ai Trio.")
+                      hideLater(3000)
+                      return
+                  }
+                  if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+                      showCard("Pengenal suara tidak tersedia di HP ini.")
+                      hideLater(3000)
+                      return
+                  }
+                  tts?.stop()
+                  sr?.destroy()
+                  pendingRec = true
+                  setFace("talk")
+                  showCard(ack())
+                  applyVoice()
+                  tts?.speak(ack(), TextToSpeech.QUEUE_FLUSH, null, "ack")
+                  ui.postDelayed({ startRec() }, 3000)
+              }
+
+              private var pendingRec = false
+
+              @Volatile private var busy = false
+
+              private fun startRec() {
+                  if (!pendingRec) return
+                  pendingRec = false
+                  val r = SpeechRecognizer.createSpeechRecognizer(this)
+                  sr = r
+                  r.setRecognitionListener(object : RecognitionListener {
+                      override fun onReadyForSpeech(p: Bundle?) { mark(true); showCard("Mendengarkan...") }
+                      override fun onResults(res: Bundle?) {
+                          mark(false)
+                          val t = res?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                          if (t.isNullOrBlank()) { showCard("Tidak terdengar."); hideLater(2000) } else handle(t)
+                      }
+                      override fun onError(e: Int) { mark(false); showCard("Suara tidak terdeteksi."); hideLater(2000) }
+                      override fun onPartialResults(p: Bundle?) {
+                          val t = p?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                          if (!t.isNullOrBlank()) showCard(t)
+                      }
+                      override fun onBeginningOfSpeech() {}
+                      override fun onRmsChanged(v: Float) {}
+                      override fun onBufferReceived(b: ByteArray?) {}
+                      override fun onEndOfSpeech() {}
+                      override fun onEvent(t: Int, b: Bundle?) {}
+                  })
+                  val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                  i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                  i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "id-ID")
+                  i.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                  r.startListening(i)
+              }
+
+              private fun handle(text: String) {
+                  val s = text.lowercase().trim()
+                  if ((s.contains("matikan") && (s.contains("ucok") || s.contains("azril") || s.contains("devan")))) {
+                      stopSelf()
+                      return
+                  }
+                  if (s.contains("jam berapa")) {
+                      reply("Sekarang pukul " + java.text.SimpleDateFormat("HH:mm", Locale("id", "ID")).format(java.util.Date()) + ".", false)
+                      return
+                  }
+                  if (s.startsWith("buka ")) {
+                      val name = s.removePrefix("buka ").removePrefix("aplikasi ").trim()
+                      val pm = packageManager
+                      val cands = pm.getInstalledApplications(0).filter {
+                          pm.getLaunchIntentForPackage(it.packageName) != null && pm.getApplicationLabel(it).toString().lowercase().contains(name)
+                      }
+                      val app = cands.firstOrNull { pm.getApplicationLabel(it).toString().lowercase() == name }
+                          ?: cands.minByOrNull { pm.getApplicationLabel(it).toString().length }
+                      if (app != null) {
+                          val li = pm.getLaunchIntentForPackage(app.packageName)!!
+                          li.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                          reply("Membuka " + pm.getApplicationLabel(app) + ", " + nick() + ".", false)
+                          startActivity(li)
+                      } else reply("Aplikasi " + name + " tidak ditemukan.", false)
+                      return
+                  }
+                  ask(text)
+              }
+
+              private fun ask(q: String) {
+                  val key = getSharedPreferences("j", MODE_PRIVATE).getString("key", "") ?: ""
+                  if (busy) {
+                      showCard("Bentar, masih mikir.")
+                      hideLater(2000)
+                      return
+                  }
+                  busy = true
+                  setFace("talk")
+                  hist.add("user" to q)
+                  showCard("Memproses...")
+                  Thread {
+                      var out: String
+                      try {
+                          val msgs = JSONArray()
+                          for ((r, c) in hist.takeLast(9).dropWhile { it.first != "user" }) msgs.put(JSONObject().put("role", r).put("content", c))
+                          val body = JSONObject().put("model", "claude-sonnet-5-5").put("max_tokens", 400).put("system", sys()).put("messages", msgs)
+                          val con = URL("https://api.anthropic.com/v1/messages").openConnection() as HttpURLConnection
+                          con.requestMethod = "POST"
+                          con.connectTimeout = 15000
+                          con.readTimeout = 60000
+                          con.doOutput = true
+                          con.setRequestProperty("x-api-key", key)
+                          con.setRequestProperty("anthropic-version", "2023-06-01")
+                          con.setRequestProperty("content-type", "application/json")
+                          con.outputStream.use { it.write(body.toString().toByteArray()) }
+                          val code = con.responseCode
+                          val txt = (if (code in 200..299) con.inputStream else con.errorStream).bufferedReader().use { it.readText() }
+                          if (code in 200..299) {
+                              out = JSONObject(txt).getJSONArray("content").getJSONObject(0).getString("text")
+                              hist.add("assistant" to out)
+                          } else {
+                              out = if (code == 401) "API key salah." else "Error " + code
+                              hist.removeAt(hist.size - 1)
+                          }
+                      } catch (e: Exception) {
+                          out = "Gagal terhubung: " + (e.message ?: "")
+                          if (hist.isNotEmpty() && hist.last().first == "user") hist.removeAt(hist.size - 1)
+                      }
+                      ui.post {
+                          busy = false
+                          reply(out, true)
+                      }
+                  }.start()
+              }
+
+              private fun names(): List<String> =
+                  (getSharedPreferences("j", MODE_PRIVATE).getString("nick", "") ?: "").split(",").map { it.trim() }.filter { it.isNotEmpty() }.ifEmpty { listOf("bro") }
+
+              private fun nick(): String = names().random()
+
+              private fun reply(t: String, fromAi: Boolean) {
+                  showCard(t)
+                  setFace("talk")
+                  applyVoice()
+                  tts?.speak(t, TextToSpeech.QUEUE_FLUSH, null, "u")
+                  hideLater(10000L + t.length * 80L)
+              }
+
+              override fun onDestroy() {
+                  ui.removeCallbacks(hideR)
+                  ui.removeCallbacksAndMessages(null)
+                  pendingRec = false
+                  try { if (cardShown) wm.removeView(card) } catch (e: Exception) {}
+                  try { wm.removeView(bubble) } catch (e: Exception) {}
+                  sr?.destroy()
+                  tts?.shutdown()
+                  super.onDestroy()
+              }
+          }
+          EOF
+      - name: Pasang gambar karakter (opsional)
+        run: |
+          mkdir -p app/src/main/res/drawable-nodpi
+          for c in ucok azril devan; do
+            for n in idle listen talk; do
+              f="${c}_$n.png"
+              if [ -f "$f" ]; then
+                if command -v convert >/dev/null 2>&1; then
+                  convert "$f" -resize '512x512>' "app/src/main/res/drawable-nodpi/$f"
+                else
+                  cp "$f" "app/src/main/res/drawable-nodpi/$f"
+                fi
+                echo "dipakai: $f"
+              fi
+            done
+          done
+      - name: Build debug APK
+        run: gradle :app:assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Acuy-Ai-APK
+          path: app/build/outputs/apk/debug/*.apk
